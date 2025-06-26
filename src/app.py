@@ -1,11 +1,11 @@
 import os
 import sys
 import logging
-import hmac
-import hashlib
-import time
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 from dotenv import load_dotenv
+from handlers.ping_handler import ping_handler
+from handlers.jenkins_handler import jenkins_handler
+from utils.slack_utils import verify_slack_request
 
 # Configure logging
 logging.basicConfig(
@@ -55,109 +55,16 @@ except Exception as e:
     print(f"Warning: Failed to initialize Jenkins connection: {e}")
     jenkins_server = None
 
-# Add connection check helper
-def check_jenkins_connection():
-    if not jenkins_server:
-        return jsonify({
-            "response_type": "ephemeral",
-            "text": "❌ Jenkins connection is not available!"
-        }), 503
-    return None
-
-def verify_slack_request():
-    # Get timestamp and signature from headers
-    timestamp = request.headers.get('X-Slack-Request-Timestamp', '')
-    slack_signature = request.headers.get('X-Slack-Signature', '')
-    
-    if not timestamp or not slack_signature:
-        return False
-    
-    # Check if the timestamp is too old (>5 minutes)
-    if abs(time.time() - float(timestamp)) > 300:
-        return False
-    
-    # Create the signature base string
-    sig_basestring = f"v0:{timestamp}:{request.get_data().decode()}"
-    
-    # Calculate hash
-    my_signature = 'v0=' + hmac.new(
-        SLACK_SIGNING_SECRET.encode(),
-        sig_basestring.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    # Compare signatures
-    return hmac.compare_digest(my_signature, slack_signature)
-
-@app.route('/slash', methods=['POST'])
-def trigger_jenkins_build():
-    # Check Jenkins connection first
-    connection_error = check_jenkins_connection()
-    if connection_error:
-        return connection_error
-
+@app.route('/deploy', methods=['POST'])
+def deploy():
     # Verify Slack request signature
-    if not verify_slack_request():
+    if not verify_slack_request(SLACK_SIGNING_SECRET):
         return jsonify({
             "response_type": "ephemeral",
             "text": "Invalid Slack request signature!"
         }), 401
-
-    # Get Slack request parameters
-    user = request.form.get('user_name')
-    text = request.form.get('text', '').strip()
     
-    # Check user permissions
-    if user not in ALLOWED_ROLES:
-        return jsonify({
-            "response_type": "ephemeral",
-            "text": f"❌ Sorry @{user}, lu gak punya akses buat trigger Jenkins!"
-        })
-
-    # Parse job name and parameters from text
-    try:
-        params = {}
-        args = text.split()
-        if not args:
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": "Usage: /jenkins-build <job_name> [param1=value1 param2=value2 ...]"
-            })
-        
-        job_name = args[0]
-        
-        # Parse optional parameters
-        for arg in args[1:]:
-            if '=' in arg:
-                key, value = arg.split('=', 1)
-                params[key] = value
-    
-        # Trigger Jenkins build
-        try:
-            jenkins_server.build_job(job_name, parameters=params)
-            return jsonify({
-                "response_type": "in_channel",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"🚀 *Build Triggered!*\n• Job: `{job_name}`\n• Triggered by: @{user}"
-                        }
-                    }
-                ]
-            })
-        except jenkins.JenkinsException as e:
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": f"❌ Jenkins Error: {str(e)}"
-            })
-            
-    except Exception as e:
-        return jsonify({
-            "response_type": "ephemeral",
-            "text": f"❌ Error: {str(e)}"
-        })
+    return jenkins_handler(jenkins_server, ALLOWED_ROLES)
 
 @app.route('/ping', methods=['POST', 'GET'])
 def ping():
@@ -168,25 +75,13 @@ def ping():
         })
 
     # For POST requests, verify Slack request signature
-    if not verify_slack_request():
+    if not verify_slack_request(SLACK_SIGNING_SECRET):
         return jsonify({
             "response_type": "ephemeral",
             "text": "Invalid Slack request signature!"
         }), 401
 
-    user = request.form.get('user_name')
-    return jsonify({
-        "response_type": "in_channel",
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"🏓 Pong! Hai @{user}, server is up and running!"
-                }
-            }
-        ]
-    })
+    return ping_handler()
 
 if __name__ == '__main__':
     try:

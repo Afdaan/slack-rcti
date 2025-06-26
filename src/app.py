@@ -1,7 +1,19 @@
 import os
+import sys
+import logging
 from flask import Flask, request, jsonify
-import jenkins
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -14,6 +26,20 @@ JENKINS_URL = os.getenv('JENKINS_URL')
 JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
 SLACK_TOKEN = os.getenv('SLACK_TOKEN')
+
+# Validate environment variables
+if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_TOKEN]):
+    logger.error("Missing required environment variables!")
+    logger.error("Please set JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, and SLACK_TOKEN")
+    sys.exit(1)
+
+# Import Jenkins after environment validation to avoid unnecessary import errors
+try:
+    import jenkins
+except ImportError as e:
+    logger.error(f"Failed to import jenkins module: {e}")
+    logger.error("Please ensure python-jenkins is installed: pip install python-jenkins")
+    sys.exit(1)
 
 # Initialize Jenkins connection
 try:
@@ -138,10 +164,13 @@ def ping():
     })
 
 if __name__ == '__main__':
-    # Verify environment variables
-    if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_TOKEN]):
-        print("Error: Missing required environment variables!")
-        print("Please set JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, and SLACK_TOKEN")
-        exit(1)
+    try:
+        # Get port from environment variable or default to 3000
+        port = int(os.getenv('PORT', 3000))
         
-    app.run(host='0.0.0.0', port=3000)
+        # Run the app
+        logger.info(f"Starting server on port {port}")
+        app.run(host='0.0.0.0', port=port)
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
+        sys.exit(1)

@@ -1,6 +1,9 @@
 import os
 import sys
 import logging
+import hmac
+import hashlib
+import time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -25,12 +28,12 @@ ALLOWED_ROLES = ['devops']
 JENKINS_URL = os.getenv('JENKINS_URL')
 JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
-SLACK_TOKEN = os.getenv('SLACK_TOKEN')
+SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 
 # Validate environment variables
-if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_TOKEN]):
+if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_SIGNING_SECRET]):
     logger.error("Missing required environment variables!")
-    logger.error("Please set JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, and SLACK_TOKEN")
+    logger.error("Please set JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, and SLACK_SIGNING_SECRET")
     sys.exit(1)
 
 # Import Jenkins after environment validation to avoid unnecessary import errors
@@ -61,8 +64,30 @@ def check_jenkins_connection():
         }), 503
     return None
 
-def verify_slack_token(token):
-    return token == SLACK_TOKEN
+def verify_slack_request():
+    # Get timestamp and signature from headers
+    timestamp = request.headers.get('X-Slack-Request-Timestamp', '')
+    slack_signature = request.headers.get('X-Slack-Signature', '')
+    
+    if not timestamp or not slack_signature:
+        return False
+    
+    # Check if the timestamp is too old (>5 minutes)
+    if abs(time.time() - float(timestamp)) > 300:
+        return False
+    
+    # Create the signature base string
+    sig_basestring = f"v0:{timestamp}:{request.get_data().decode()}"
+    
+    # Calculate hash
+    my_signature = 'v0=' + hmac.new(
+        SLACK_SIGNING_SECRET.encode(),
+        sig_basestring.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Compare signatures
+    return hmac.compare_digest(my_signature, slack_signature)
 
 @app.route('/slash', methods=['POST'])
 def trigger_jenkins_build():
@@ -71,11 +96,11 @@ def trigger_jenkins_build():
     if connection_error:
         return connection_error
 
-    # Verify Slack token
-    if not verify_slack_token(request.form.get('token')):
+    # Verify Slack request signature
+    if not verify_slack_request():
         return jsonify({
             "response_type": "ephemeral",
-            "text": "Invalid Slack token!"
+            "text": "Invalid Slack request signature!"
         }), 401
 
     # Get Slack request parameters
@@ -142,11 +167,11 @@ def ping():
             "message": "Server is running"
         })
 
-    # For POST requests, verify Slack token
-    if not verify_slack_token(request.form.get('token')):
+    # For POST requests, verify Slack request signature
+    if not verify_slack_request():
         return jsonify({
             "response_type": "ephemeral",
-            "text": "Invalid Slack token!"
+            "text": "Invalid Slack request signature!"
         }), 401
 
     user = request.form.get('user_name')

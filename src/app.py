@@ -10,8 +10,8 @@ app = Flask(__name__)
 
 # Configuration
 ALLOWED_USERS = ['devops']
-JENKINS_URL = os.getenv('JENKINS_URL', 'http://localhost:8080')
-JENKINS_USER = os.getenv('JENKINS_USER', 'admin')
+JENKINS_URL = os.getenv('JENKINS_URL')
+JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
 SLACK_TOKEN = os.getenv('SLACK_TOKEN')
 

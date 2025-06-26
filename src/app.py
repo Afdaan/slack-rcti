@@ -90,6 +90,29 @@ def trigger_jenkins_build():
             "text": f"❌ Error: {str(e)}"
         })
 
+@app.route('/ping', methods=['POST'])
+def ping():
+    # Verify Slack token
+    if not verify_slack_token(request.form.get('token')):
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": "Invalid Slack token!"
+        }), 401
+
+    user = request.form.get('user_name')
+    return jsonify({
+        "response_type": "in_channel",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🏓 Pong! Hai @{user}, server is up and running!"
+                }
+            }
+        ]
+    })
+
 if __name__ == '__main__':
     # Verify environment variables
     if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_TOKEN]):

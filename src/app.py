@@ -9,24 +9,42 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configuration
-ALLOWED_USERS = ['devops']
+ALLOWED_ROLES = ['devops']
 JENKINS_URL = os.getenv('JENKINS_URL')
 JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
 SLACK_TOKEN = os.getenv('SLACK_TOKEN')
 
 # Initialize Jenkins connection
-jenkins_server = jenkins.Jenkins(
-    JENKINS_URL,
-    username=JENKINS_USER,
-    password=JENKINS_TOKEN
-)
+try:
+    jenkins_server = jenkins.Jenkins(
+        JENKINS_URL,
+        username=JENKINS_USER,
+        password=JENKINS_TOKEN
+    )
+except Exception as e:
+    print(f"Warning: Failed to initialize Jenkins connection: {e}")
+    jenkins_server = None
+
+# Add connection check helper
+def check_jenkins_connection():
+    if not jenkins_server:
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": "❌ Jenkins connection is not available!"
+        }), 503
+    return None
 
 def verify_slack_token(token):
     return token == SLACK_TOKEN
 
 @app.route('/slash', methods=['POST'])
 def trigger_jenkins_build():
+    # Check Jenkins connection first
+    connection_error = check_jenkins_connection()
+    if connection_error:
+        return connection_error
+
     # Verify Slack token
     if not verify_slack_token(request.form.get('token')):
         return jsonify({
@@ -39,7 +57,7 @@ def trigger_jenkins_build():
     text = request.form.get('text', '').strip()
     
     # Check user permissions
-    if user not in ALLOWED_USERS:
+    if user not in ALLOWED_ROLES:
         return jsonify({
             "response_type": "ephemeral",
             "text": f"❌ Sorry @{user}, lu gak punya akses buat trigger Jenkins!"
@@ -90,9 +108,15 @@ def trigger_jenkins_build():
             "text": f"❌ Error: {str(e)}"
         })
 
-@app.route('/ping', methods=['POST'])
+@app.route('/ping', methods=['POST', 'GET'])
 def ping():
-    # Verify Slack token
+    if request.method == 'GET':
+        return jsonify({
+            "status": "ok",
+            "message": "Server is running"
+        })
+
+    # For POST requests, verify Slack token
     if not verify_slack_token(request.form.get('token')):
         return jsonify({
             "response_type": "ephemeral",

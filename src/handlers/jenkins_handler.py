@@ -144,10 +144,28 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 "text": f"❌ Job not found: {build_job}"
             })
 
+        # Verify both build and k8s jobs exist
+        try:
+            build_info = jenkins_server.get_job_info(build_job)
+            k8s_info = jenkins_server.get_job_info(k8s_job)
+        except jenkins.NotFoundException as e:
+            missing_job = build_job if "build" in str(e) else k8s_job
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": f"❌ Job not found: {missing_job}"
+            })
+
         # Trigger build job
         try:
+            # Set same parameters for k8s job
+            k8s_params = {
+                'BRANCH': params['BRANCH']  # Pass the same branch to k8s job
+            }
+            
+            # Start the build job
             build_number = jenkins_server.build_job(build_job, parameters=params)
             build_url = f"{jenkins_server.get_job_url(build_job)}/{build_number}/console"
+            k8s_url = jenkins_server.get_job_url(k8s_job)
 
             # Prepare response message
             response_text = (
@@ -161,8 +179,9 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             
             response_text += (
                 f"• Build Job: {build_url}\n"
+                f"• K8s Job: {k8s_url}\n"
                 f"• Triggered by: @{user_name}\n\n"
-                f"_Note: `{k8s_job}` will be triggered automatically after build completes_"
+                f"_Note: `{k8s_job}` will be triggered automatically with branch=`{params['BRANCH']}`_"
             )
 
             return jsonify({

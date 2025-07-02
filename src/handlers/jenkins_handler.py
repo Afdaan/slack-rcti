@@ -1,8 +1,9 @@
 from flask import jsonify, request
-import jenkins
 import re
 import os
 import logging
+from jenkinsapi.jenkins import Jenkins
+from jenkinsapi.custom_exceptions import JenkinsAPIException
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -146,77 +147,57 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
 
         # Verify job exists and get job info
         try:
-            logger.info(f"Attempting to get job info for: {job_name}")
+            logger.info(f"Checking if job exists: {job_name}")
             
-            # First check if job exists using get_all_jobs
-            all_jobs = jenkins_server.get_all_jobs()
-            job_exists = any(job['name'] == job_name for job in all_jobs)
-            
-            if not job_exists:
-                logger.error(f"Job {job_name} not found in Jenkins job list")
+            if job_name not in jenkins_server.keys():
+                logger.error(f"Job {job_name} not found in Jenkins")
                 return jsonify({
                     "response_type": "ephemeral",
                     "text": f"❌ Job not found: {job_name}"
                 })
             
-            # If job exists, try to get its info
-            try:
-                job_info = jenkins_server.get_job_info(job_name)
-                logger.info(f"Successfully retrieved job info for {job_name}")
-            except Exception as e:
-                logger.warning(f"Could not get full job info for {job_name}, continuing with basic info. Error: {str(e)}")
-                job_info = {'name': job_name}  # Use minimal job info
+            # Get the job
+            job = jenkins_server[job_name]
+            logger.info(f"Found job: {job_name}")
             
-        except Exception as e:
-            logger.error(f"Error checking job existence: {str(e)}")
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": f"❌ Error accessing Jenkins job: {job_name}\nError: {str(e)}"
-            })
-
-        # Start building response message
-        response_text = (
-            f"🚀 *Deployment Started!*\n"
-            f"• Job: `{job_name}`\n"
-            f"• Branch: `{params['BRANCH']}`\n"
-        )
-        
-        if 'COMMIT' in params:
-            response_text += f"• Commit: `{params['COMMIT']}`\n"
-
-        # Get downstream jobs that will be triggered after this one
-        downstream_jobs = []
-        if job_info.get('downstreamProjects'):
-            for downstream in job_info['downstreamProjects']:
-                downstream_name = downstream.get('name')
-                if downstream_name:
-                    try:
-                        # Just check if downstream job exists
-                        if any(job['name'] == downstream_name for job in all_jobs):
-                            downstream_jobs.append(downstream_name)
-                            logger.info(f"Found valid downstream job: {downstream_name}")
-                        else:
-                            logger.warning(f"Downstream job not found in job list: {downstream_name}")
-                    except Exception as e:
-                        logger.warning(f"Error checking downstream job {downstream_name}: {str(e)}")
-                        continue
-
-        # Trigger the job
-        try:
-            logger.info(f"Triggering job {job_name} with parameters: {params}")
-            build_number = jenkins_server.build_job(job_name, parameters=params)
-            logger.info(f"Successfully triggered job {job_name}, build #{build_number}")
-            
-            # Get job URL - handle cases where get_job_url might fail
+            # Get downstream jobs
+            downstream_jobs = []
             try:
-                job_url = f"{jenkins_server.get_job_url(job_name)}/{build_number}/console"
+                for _, downstream in job.get_downstream_jobs():
+                    downstream_jobs.append(downstream.name)
+                    logger.info(f"Found downstream job: {downstream.name}")
             except Exception as e:
-                logger.warning(f"Could not get job URL: {str(e)}")
-                job_url = f"Jenkins job: {job_name} #{build_number}"
+                logger.warning(f"Error getting downstream jobs: {str(e)}")
+            
+            # Trigger build with parameters
+            logger.info(f"Triggering build for {job_name} with params: {params}")
+            queue_item = job.invoke(build_params=params)
+            logger.info("Build queued successfully")
+            
+            # Wait for build number (with timeout)
+            try:
+                build = queue_item.get_build(timeout=10)
+                build_number = build.buildno
+                build_url = build.baseurl
+                logger.info(f"Build started: #{build_number}")
+            except Exception as e:
+                logger.warning(f"Could not get build number/URL: {str(e)}")
+                build_number = "queued"
+                build_url = job.baseurl
+            
+            # Build response message
+            response_text = (
+                f"🚀 *Deployment Started!*\n"
+                f"• Job: `{job_name}`\n"
+                f"• Branch: `{params['BRANCH']}`\n"
+            )
+            
+            if 'COMMIT' in params:
+                response_text += f"• Commit: `{params['COMMIT']}`\n"
                 
-            response_text += f"• Job URL: {job_url}\n"
+            response_text += f"• Build: #{build_number}\n"
+            response_text += f"• URL: {build_url}\n"
             
-            # Add information about downstream jobs
             if downstream_jobs:
                 response_text += f"• Downstream Jobs: {', '.join(f'`{j}`' for j in downstream_jobs)}\n"
                 response_text += f"_Note: Downstream jobs will be triggered automatically with branch=`{params['BRANCH']}`_\n"
@@ -236,11 +217,18 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 ]
             })
 
-        except jenkins.JenkinsException as e:
-            logger.error(f"Jenkins error while triggering job {job_name}: {str(e)}")
+        except JenkinsAPIException as e:
+            logger.error(f"Jenkins API error: {str(e)}")
+            if "401" in str(e):
+                error_msg = "❌ Authentication failed. Please check Jenkins credentials."
+            elif "403" in str(e):
+                error_msg = "❌ Access denied. Please check your permissions."
+            else:
+                error_msg = f"❌ Jenkins Error: {str(e)}"
+            
             return jsonify({
                 "response_type": "ephemeral",
-                "text": f"❌ Jenkins Error: {str(e)}"
+                "text": error_msg
             })
 
     except Exception as e:

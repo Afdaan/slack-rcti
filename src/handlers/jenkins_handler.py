@@ -108,6 +108,7 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
     try:
         # Parse command arguments
         params = {}
+        branch_value = None  # Store branch value for downstream jobs
         args = text.split()
         if len(args) < 2:  # Need at least job name and branch
             return jsonify({
@@ -131,7 +132,7 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                             "response_type": "ephemeral",
                             "text": f"❌ Invalid branch name format: {value}"
                         })
-                    params['BRANCH'] = value
+                    branch_value = value.strip()  # Store branch value
                     branch_specified = True
                 elif key == 'commit':
                     if not validate_commit_hash(value):
@@ -165,6 +166,12 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 # Get the job
                 job = jenkins[job_name]
                 logger.info(f"Found job: {job_name}")
+
+                # Check if job accepts BRANCH parameter
+                job_config = job.get_config()
+                has_branch_param = 'BRANCH' in job_config
+                if has_branch_param:
+                    params['BRANCH'] = branch_value
                 
             except Exception as e:
                 logger.error(f"Error checking job: {str(e)}")
@@ -180,13 +187,35 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 for downstream in downstream_info:
                     downstream_jobs.append(downstream.name)
                     logger.info(f"Found downstream job: {downstream.name}")
+                    
+                    # Try to set environment variable for branch if downstream exists
+                    try:
+                        downstream_config = downstream.get_config()
+                        if 'BRANCH' in downstream_config:
+                            # Set environment property for downstream job
+                            downstream.set_config_parameter('BRANCH', branch_value)
+                            logger.info(f"Set BRANCH={branch_value} for downstream job {downstream.name}")
+                    except Exception as e:
+                        logger.warning(f"Could not set branch for downstream job {downstream.name}: {str(e)}")
+                        
             except Exception as e:
                 logger.warning(f"Error getting downstream jobs: {str(e)}")
             
-            # Trigger build with parameters
-            logger.info(f"Triggering build for {job_name} with params: {params}")
-            queue_item = job.invoke(build_params=params)
-            logger.info("Build queued successfully")
+            # Trigger build with parameters (if any)
+            logger.info(f"Triggering build for {job_name}" + (f" with params: {params}" if params else " without params"))
+            try:
+                if params:
+                    queue_item = job.invoke(build_params=params)
+                else:
+                    queue_item = job.invoke()
+                logger.info("Build queued successfully")
+            except Exception as e:
+                if "This job does not support parameters" in str(e):
+                    # Try without parameters
+                    queue_item = job.invoke()
+                    logger.info("Build queued successfully without parameters")
+                else:
+                    raise e
             
             # Wait for build number (with timeout)
             try:

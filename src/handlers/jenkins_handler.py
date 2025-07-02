@@ -67,14 +67,17 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
     user_name = request.form.get('user_name')
     text = request.form.get('text', '').strip()
     
-    # Check user permissions in any of the allowed groups
-    has_access = any(check_user_in_usergroup(user_id, group) for group in allowed_usergroups)
+    # TODO: Uncomment this block later for proper user group checking
+    # has_access = any(check_user_in_usergroup(user_id, group) for group in allowed_usergroups)
     
-    if not has_access:
-        return jsonify({
-            "response_type": "ephemeral",
-            "text": f"❌ Sorry @{user_name}, lu gak punya akses buat trigger Jenkins!\nPerlu join Slack User Group: {', '.join(allowed_usergroups)}"
-        })
+    # if not has_access:
+    #     return jsonify({
+    #         "response_type": "ephemeral",
+    #         "text": f"❌ Sorry @{user_name}, lu gak punya akses buat trigger Jenkins!\nPerlu join Slack User Group: {', '.join(allowed_usergroups)}"
+    #     })
+    
+    # Temporary: Allow all users (DEVELOPMENT ONLY)
+    has_access = True
 
     # Show help if no arguments
     if not text:

@@ -1,49 +1,59 @@
-name: Deploy Slack RCTI App
+name: Deploy API to Self-Hosted Server (Develop)
 
 on:
   push:
     branches:
       - development
-  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: self-hosted
     steps:
-      - name: Update codebase
+      - name: Checkout latest code
+        uses: actions/checkout@v4
+
+      - name: Prepare and update codebase
         run: |
           cd /opt/slack-rcti
-          git pull
+          git stash --include-untracked || true
+          git checkout development
+          git pull origin development
 
       - name: Install Python dependencies
         run: |
           cd /opt/slack-rcti
-          source venv/bin/activate || true
           pip install -r requirements.txt
 
-      - name: Stop existing Slack RCTI process
+      - name: Stop existing process
+        run: |
+          cd /opt/slack-rcti
+          pkill -f "python src/app.py" || true
+
+      - name: Start API server in background
+        run: |
+          cd /opt/slack-rcti
+          nohup python src/app.py > bot.log 2>&1 &
+          echo "API started in background"
+
+      - name: Stop existing background process
         run: |
           cd /opt/slack-rcti
           tmux kill-session -t slack-rcti || true
           echo "Previous tmux session terminated (if existed)"
 
-      - name: Start Slack RCTI in tmux
+      - name: Start API in tmux
         run: |
           cd /opt/slack-rcti
-          if ! tmux has-session -t slack-rcti 2>/dev/null; then
-          tmux new-session -d -s slack-rcti "source venv/bin/activate && python src/app.py"
-          echo "Slack RCTI started in tmux session: slack-rcti"
-            else
-          echo "Tmux session slack-rcti already exists, using existing session"
-            fi
+          tmux new-session -d -s slack-rcti "python src/app.py > bot.log 2>&1"
+          echo "API started in tmux session: slack-rcti"
 
-      - name: Check if Slack RCTI is running
+      - name: Check if API is running
         run: |
-          sleep 3
+          sleep 5
           if tmux has-session -t slack-rcti 2>/dev/null; then
-            echo "Slack RCTI is running successfully in tmux session"
+            echo "API is running successfully in tmux session"
           else
-            echo "Failed to start Slack RCTI in tmux"
+            echo "Failed to start API in tmux"
             exit 1
           fi
 
@@ -69,7 +79,7 @@ jobs:
           BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g')
 
           TELEGRAM_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-          MSG="✨ Slack-RCTI-API! ✨%0A%0ABranch: <code>$BRANCH_NAME</code>%0ACommit: <code>$LAST_COMMIT_HASH</code>%0AAuthor: <b>$LAST_COMMIT_AUTHOR</b>%0ATime: $LAST_COMMIT_TIME%0A%0A<b>Changelog:</b>%0A$LAST_COMMIT_MSG"
+          MSG="✨ AlyaBot Deploy Sukses (Develop)! ✨%0A%0ABranch: <code>$BRANCH_NAME</code>%0ACommit: <code>$LAST_COMMIT_HASH</code>%0AAuthor: <b>$LAST_COMMIT_AUTHOR</b>%0ATime: $LAST_COMMIT_TIME%0A%0A<b>Changelog:</b>%0A$LAST_COMMIT_MSG"
 
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
             if [ -n "$TELEGRAM_TOPIC_ID" ]; then

@@ -149,21 +149,34 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
         try:
             logger.info(f"Checking if job exists: {job_name}")
             
-            if not jenkins_server.has_job(job_name):
-                logger.error(f"Job {job_name} not found in Jenkins")
+            try:
+                # Get all jobs first
+                all_jobs = [name for name in jenkins_server.get_jobs_list()]
+                logger.info(f"Found {len(all_jobs)} total jobs")
+                
+                if job_name not in all_jobs:
+                    logger.error(f"Job {job_name} not found in Jenkins")
+                    return jsonify({
+                        "response_type": "ephemeral",
+                        "text": f"❌ Job not found: {job_name}"
+                    })
+                
+            except Exception as e:
+                logger.error(f"Error getting jobs list: {str(e)}")
                 return jsonify({
                     "response_type": "ephemeral",
-                    "text": f"❌ Job not found: {job_name}"
+                    "text": f"❌ Error accessing Jenkins: {str(e)}"
                 })
             
             # Get the job
-            job = jenkins_server.get_job(job_name)
+            job = jenkins_server[job_name]
             logger.info(f"Found job: {job_name}")
             
             # Get downstream jobs
             downstream_jobs = []
             try:
-                for downstream in job.get_downstream_jobs():
+                downstream_info = job.get_downstream_jobs()
+                for downstream in downstream_info:
                     downstream_jobs.append(downstream.name)
                     logger.info(f"Found downstream job: {downstream.name}")
             except Exception as e:

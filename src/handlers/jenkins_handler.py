@@ -83,8 +83,16 @@ def handle_downstream_build(jenkins, main_build, downstream_name, branch_value, 
                 # Get the latest build
                 latest_build = downstream_job.get_last_build()
                 if latest_build:
-                    # Check if this is a new build (started after our main build completed)
-                    if latest_build.get_timestamp() > main_build.get_timestamp():
+                    # Check the build cause
+                    cause = get_build_cause(latest_build)
+                    if (cause and 
+                        cause['type'] == 'upstream' and 
+                        cause['project'] == main_build.job.name and
+                        cause['build'] == main_build.buildno):
+                        build = latest_build
+                        break
+                    # Fallback to timestamp check if cause check fails
+                    elif latest_build.get_timestamp() > main_build.get_timestamp():
                         build = latest_build
                         break
             except Exception as e:
@@ -226,41 +234,59 @@ def async_handle_builds(job_name, build, downstream_jobs, branch_value, channel_
         logger.error(f"Error in async build handling: {str(e)}")
 
 def check_and_handle_input(build, branch_value):
-    """Check if build is waiting for input and handle it"""
+    """Check if build is waiting for input and handle Pipeline Input Step"""
     try:
         if not hasattr(build, 'is_running') or not build.is_running():
             return False
 
-        # Get the build URL and check for input state
+        # Get the build info to check for input action
         build_url = build.baseurl
-        if '/input/' in build_url:  # Changed from endswith to 'in' check
+        build.poll()  # Refresh build info
+        
+        # Check if build has InputAction in its actions
+        build_info = build.get_actions()
+        has_input = any(
+            action.get('_class') == 'org.jenkinsci.plugins.workflow.support.steps.input.InputAction'
+            for action in build_info
+        )
+        
+        if has_input and '/input/' in build_url:
             logger.info(f"Build {build.buildno} is waiting for input")
             try:
-                # Try multiple input submission methods
-                input_urls = [
-                    f"{build_url}input/proceed",
-                    f"{build_url}submitInput"
-                ]
+                # For Pipeline Input Step, we need to submit the input differently
+                input_url = f"{build_url}input/submit"
                 
-                for url in input_urls:
-                    try:
-                        build.job.jenkins.requester.post_and_confirm_status(
-                            url,
-                            data={
-                                'proceed': 'true',
-                                'Branch': branch_value,
-                                'json': '{"parameter": [{"name": "BRANCH", "value": "' + branch_value + '"}]}'
-                            }
-                        )
-                        logger.info(f"Successfully submitted branch parameter via {url}")
-                        return True
-                    except Exception as e:
-                        logger.debug(f"Input submission failed for {url}: {str(e)}")
-                        continue
-                        
-                return False
+                # First, get the input form to check what parameters it needs
+                form_data = build.job.jenkins.requester.get_url(f"{build_url}input/").text
+                
+                # Prepare the input submission data
+                submit_data = {
+                    'proceed': 'true',
+                    'Jenkins-Crumb': build.job.jenkins.requester.CRUMB,
+                }
+                
+                # If the form contains BRANCH parameter, add it
+                if 'BRANCH' in form_data:
+                    submit_data.update({
+                        'BRANCH': branch_value,
+                        'json': f'{{"parameter": {{"name": "BRANCH", "value": "{branch_value}"}}}}'
+                    })
+                
+                # Submit the input
+                response = build.job.jenkins.requester.post_and_confirm_status(
+                    input_url,
+                    data=submit_data
+                )
+                
+                if response.status_code == 200:
+                    logger.info(f"Successfully submitted input for build {build.buildno}")
+                    return True
+                else:
+                    logger.warning(f"Input submission returned status {response.status_code}")
+                    return False
+                    
             except Exception as e:
-                logger.warning(f"Could not submit input parameter: {str(e)}")
+                logger.warning(f"Could not submit input: {str(e)}")
                 return False
     except Exception as e:
         logger.warning(f"Error checking build status: {str(e)}")
@@ -533,3 +559,35 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             "response_type": "ephemeral",
             "text": f"❌ Error: {str(e)}"
         })
+
+def get_build_cause(build):
+    """Get the cause of a build, especially useful for checking upstream triggers"""
+    try:
+        actions = build.get_actions()
+        for action in actions:
+            if action.get('_class') == 'hudson.model.CauseAction':
+                causes = action.get('causes', [])
+                for cause in causes:
+                    if cause.get('_class') == 'hudson.model.Cause$UpstreamCause':
+                        return {
+                            'type': 'upstream',
+                            'project': cause.get('upstreamProject'),
+                            'build': cause.get('upstreamBuild'),
+                            'url': cause.get('upstreamUrl')
+                        }
+        return None
+    except Exception as e:
+        logger.debug(f"Error getting build cause: {str(e)}")
+        return None
+
+def is_waiting_for_input(build):
+    """Check if a build is waiting for input"""
+    try:
+        actions = build.get_actions()
+        return any(
+            action.get('_class') == 'org.jenkinsci.plugins.workflow.support.steps.input.InputAction'
+            for action in actions
+        )
+    except Exception as e:
+        logger.debug(f"Error checking input status: {str(e)}")
+        return False

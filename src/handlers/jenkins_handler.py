@@ -1,6 +1,12 @@
 from flask import jsonify, request
 import jenkins
 import re
+import os
+import logging
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+
+logger = logging.getLogger(__name__)
 
 def validate_branch_name(branch):
     """Validate branch name format"""
@@ -10,7 +16,45 @@ def validate_commit_hash(commit):
     """Validate commit hash format"""
     return bool(re.match(r'^[a-f0-9]{5,40}$', commit.lower()))
 
-def jenkins_handler(jenkins_server, allowed_roles):
+def check_user_in_usergroup(user_id, usergroup):
+    """Check if user is member of specified Slack User Group"""
+    try:
+        # Initialize Slack client
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackApiError
+        
+        client = WebClient(token=os.getenv('SLACK_BOT_TOKEN'))
+        
+        # Get user groups
+        response = client.usergroups_list()
+        if not response["ok"]:
+            logger.error(f"Failed to get user groups: {response['error']}")
+            return False
+            
+        # Find the requested usergroup
+        usergroup_id = None
+        for group in response["usergroups"]:
+            if group["handle"] == usergroup:
+                usergroup_id = group["id"]
+                break
+                
+        if not usergroup_id:
+            logger.error(f"Usergroup not found: {usergroup}")
+            return False
+            
+        # Get users in the group
+        response = client.usergroups_users_list(usergroup=usergroup_id)
+        if not response["ok"]:
+            logger.error(f"Failed to get usergroup members: {response['error']}")
+            return False
+            
+        return user_id in response["users"]
+        
+    except Exception as e:
+        logger.error(f"Error checking user group membership: {e}")
+        return False
+
+def jenkins_handler(jenkins_server, allowed_usergroups):
     """Handle the /deploy slash command for Jenkins operations"""
     if not jenkins_server:
         return jsonify({
@@ -19,14 +63,17 @@ def jenkins_handler(jenkins_server, allowed_roles):
         }), 503
 
     # Get Slack request parameters
-    user = request.form.get('user_name')
+    user_id = request.form.get('user_id')
+    user_name = request.form.get('user_name')
     text = request.form.get('text', '').strip()
     
-    # Check user permissions
-    if user not in allowed_roles:
+    # Check user permissions in any of the allowed groups
+    has_access = any(check_user_in_usergroup(user_id, group) for group in allowed_usergroups)
+    
+    if not has_access:
         return jsonify({
             "response_type": "ephemeral",
-            "text": f"❌ Sorry @{user}, lu gak punya akses buat trigger Jenkins!"
+            "text": f"❌ Sorry @{user_name}, lu gak punya akses buat trigger Jenkins!\nPerlu join Slack User Group: {', '.join(allowed_usergroups)}"
         })
 
     # Show help if no arguments
@@ -114,7 +161,7 @@ def jenkins_handler(jenkins_server, allowed_roles):
             
             response_text += (
                 f"• Build Job: {build_url}\n"
-                f"• Triggered by: @{user}\n\n"
+                f"• Triggered by: @{user_name}\n\n"
                 f"_Note: `{k8s_job}` will be triggered automatically after build completes_"
             )
 

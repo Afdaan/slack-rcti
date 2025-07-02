@@ -31,17 +31,27 @@ jobs:
           source venv/bin/activate
           pip install -r requirements.txt
 
-      - name: Stop existing process
-        run: |
-          cd /opt/slack-rcti
-          pkill -f "python src/app.py" || true
-
-      - name: Start API in tmux
+      - name: Restart API in tmux
         run: |
           cd /opt/slack-rcti
           source venv/bin/activate
-          tmux kill-session -t slack-rcti || true
-          tmux new-session -d -s slack-rcti "source venv/bin/activate && python src/app.py > bot.log 2>&1"
+          
+          # If tmux session exists, send Ctrl+C and wait
+          if tmux has-session -t slack-rcti 2>/dev/null; then
+            echo "Stopping existing API process..."
+            tmux send-keys -t slack-rcti C-c
+            sleep 3  # Wait for graceful shutdown
+          else
+            echo "No existing tmux session found, creating new one..."
+            tmux new-session -d -s slack-rcti
+          fi
+          
+          # Clear the tmux pane and start the API
+          echo "Starting API..."
+          tmux send-keys -t slack-rcti "cd /opt/slack-rcti" Enter
+          tmux send-keys -t slack-rcti "source venv/bin/activate" Enter
+          tmux send-keys -t slack-rcti "python src/app.py > bot.log 2>&1" Enter
+          
           echo "API started in tmux session: slack-rcti"
 
       - name: Check if API is running

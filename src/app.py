@@ -24,11 +24,12 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configuration
-ALLOWED_ROLES = ['devops']
+ALLOWED_USERGROUPS = ['devops']
 JENKINS_URL = os.getenv('JENKINS_URL')
 JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 
 # Validate environment variables
 if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_SIGNING_SECRET]):
@@ -64,7 +65,7 @@ def deploy():
             "text": "Invalid Slack request signature!"
         }), 401
     
-    return jenkins_handler(jenkins_server, ALLOWED_ROLES)
+    return jenkins_handler(jenkins_server, ALLOWED_USERGROUPS)
 
 @app.route('/ping', methods=['POST', 'GET'])
 def ping():

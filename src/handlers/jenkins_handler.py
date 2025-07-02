@@ -10,7 +10,16 @@ logger = logging.getLogger(__name__)
 
 def validate_branch_name(branch):
     """Validate branch name format"""
-    return bool(re.match(r'^[a-zA-Z0-9_./\-]+$', branch))
+    # Clean the branch name first (remove any leading/trailing spaces)
+    branch = branch.strip()
+    
+    # Basic validation: allow letters, numbers, and common branch characters
+    is_valid = bool(re.match(r'^[a-zA-Z0-9_./\-]+$', branch))
+    
+    if not is_valid:
+        logger.warning(f"Branch validation failed. Branch: '{branch}', Length: {len(branch)}, Chars: {[ord(c) for c in branch]}")
+    
+    return is_valid
 
 def validate_commit_hash(commit):
     """Validate commit hash format"""

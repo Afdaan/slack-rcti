@@ -468,16 +468,10 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 else:
                     raise e
             
-            # Wait for build to start with initial polling
-            build = wait_for_build_to_start(queue_item, max_attempts=5)  # Quick initial check
-            if build:
-                build_number = build.buildno
-                build_url = build.baseurl
-                logger.info(f"Build started: #{build_number}")
-            else:
-                logger.warning("Build not started yet, will continue monitoring in background")
-                build_number = "queued"
-                build_url = job.baseurl
+            # Don't wait for build to start, just get the initial URL
+            build_number = "queued"
+            build_url = job.baseurl
+            logger.info("Build queued, will monitor in background")
 
             # Get channel ID from request for async updates
             channel_id = request.form.get('channel_id')
@@ -507,12 +501,11 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             })
 
             # Start async monitoring in a separate thread
-            if build:
-                thread = threading.Thread(
-                    target=async_handle_builds,
-                    args=(job_name, build, downstream_jobs, branch_value, channel_id, response.headers.get('X-Slack-Message-Ts'))
-                )
-                thread.start()
+            thread = threading.Thread(
+                target=async_monitor_build_start,
+                args=(job, queue_item, job_name, branch_value, downstream_jobs, channel_id, response.headers.get('X-Slack-Message-Ts'))
+            )
+            thread.start()
                 
             return response
             
@@ -591,3 +584,50 @@ def is_waiting_for_input(build):
     except Exception as e:
         logger.debug(f"Error checking input status: {str(e)}")
         return False
+
+def async_monitor_build_start(job, queue_item, job_name, branch_value, downstream_jobs, channel_id, thread_ts, max_attempts=30):
+    """Asynchronously monitor for build to start and then handle the build"""
+    try:
+        slack_client = WebClient(token=os.getenv('SLACK_BOT_TOKEN'))
+        
+        # Wait for build to start with more attempts
+        build = None
+        for attempt in range(max_attempts):
+            try:
+                build = queue_item.get_build()
+                if build:
+                    # Update the message with build number
+                    status_msg = (
+                        f"🚀 *Deployment Update!*\n"
+                        f"• Job: `{job_name}`\n"
+                        f"• Branch: `{branch_value}`\n"
+                        f"• Build: <{build.baseurl}|#{build.buildno}> (Started)\n"
+                    )
+                    if downstream_jobs:
+                        status_msg += f"• Downstream Jobs: {', '.join(f'`{j}`' for j in downstream_jobs)}\n"
+                    
+                    slack_client.chat_postMessage(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=status_msg
+                    )
+                    
+                    # Start monitoring the build
+                    thread = threading.Thread(
+                        target=async_handle_builds,
+                        args=(job_name, build, downstream_jobs, branch_value, channel_id, thread_ts)
+                    )
+                    thread.start()
+                    return
+            except Exception as e:
+                logger.debug(f"Build not ready yet (attempt {attempt + 1}/{max_attempts}): {str(e)}")
+            time.sleep(2)
+        
+        # If build didn't start after all attempts
+        slack_client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=f"⚠️ Build queued but didn't start after {max_attempts * 2} seconds. Please check Jenkins manually."
+        )
+    except Exception as e:
+        logger.error(f"Error in async build start monitoring: {str(e)}")

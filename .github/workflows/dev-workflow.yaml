@@ -19,9 +19,16 @@ jobs:
           git checkout development
           git pull origin development
 
+      - name: Setup Python Virtual Environment
+        run: |
+          cd /opt/slack-rcti
+          source venv/bin/activate
+          python -m pip install --upgrade pip
+
       - name: Install Python dependencies
         run: |
           cd /opt/slack-rcti
+          source venv/bin/activate
           pip install -r requirements.txt
 
       - name: Stop existing process
@@ -29,22 +36,12 @@ jobs:
           cd /opt/slack-rcti
           pkill -f "python src/app.py" || true
 
-      - name: Start API server in background
-        run: |
-          cd /opt/slack-rcti
-          nohup python src/app.py > bot.log 2>&1 &
-          echo "API started in background"
-
-      - name: Stop existing background process
-        run: |
-          cd /opt/slack-rcti
-          tmux kill-session -t slack-rcti || true
-          echo "Previous tmux session terminated (if existed)"
-
       - name: Start API in tmux
         run: |
           cd /opt/slack-rcti
-          tmux new-session -d -s slack-rcti "python src/app.py > bot.log 2>&1"
+          source venv/bin/activate
+          tmux kill-session -t slack-rcti || true
+          tmux new-session -d -s slack-rcti "source venv/bin/activate && python src/app.py > bot.log 2>&1"
           echo "API started in tmux session: slack-rcti"
 
       - name: Check if API is running

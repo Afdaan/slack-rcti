@@ -113,7 +113,7 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
 
         # Get job name exactly as provided
         job_name = args[0].strip()
-        logger.info(f"Processing job: {job_name}")
+        logger.info(f"Processing job request: {job_name}")
 
         # Parse parameters
         branch_specified = False
@@ -144,13 +144,34 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                         "Usage: /deploy <job_name> branch=<branch_name> [commit=<commit_hash>]"
             })
 
-        # Verify job exists
+        # Verify job exists and get job info
         try:
-            job_info = jenkins_server.get_job_info(job_name)
-        except jenkins.NotFoundException:
+            logger.info(f"Attempting to get job info for: {job_name}")
+            
+            # First check if job exists using get_all_jobs
+            all_jobs = jenkins_server.get_all_jobs()
+            job_exists = any(job['name'] == job_name for job in all_jobs)
+            
+            if not job_exists:
+                logger.error(f"Job {job_name} not found in Jenkins job list")
+                return jsonify({
+                    "response_type": "ephemeral",
+                    "text": f"❌ Job not found: {job_name}"
+                })
+            
+            # If job exists, try to get its info
+            try:
+                job_info = jenkins_server.get_job_info(job_name)
+                logger.info(f"Successfully retrieved job info for {job_name}")
+            except Exception as e:
+                logger.warning(f"Could not get full job info for {job_name}, continuing with basic info. Error: {str(e)}")
+                job_info = {'name': job_name}  # Use minimal job info
+            
+        except Exception as e:
+            logger.error(f"Error checking job existence: {str(e)}")
             return jsonify({
                 "response_type": "ephemeral",
-                "text": f"❌ Job not found: {job_name}"
+                "text": f"❌ Error accessing Jenkins job: {job_name}\nError: {str(e)}"
             })
 
         # Start building response message
@@ -165,22 +186,34 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
 
         # Get downstream jobs that will be triggered after this one
         downstream_jobs = []
-        if 'downstreamProjects' in job_info:
+        if job_info.get('downstreamProjects'):
             for downstream in job_info['downstreamProjects']:
                 downstream_name = downstream.get('name')
                 if downstream_name:
                     try:
-                        # Verify downstream job exists and add to list
-                        jenkins_server.get_job_info(downstream_name)
-                        downstream_jobs.append(downstream_name)
-                    except jenkins.NotFoundException:
-                        logger.warning(f"Downstream job not found: {downstream_name}")
+                        # Just check if downstream job exists
+                        if any(job['name'] == downstream_name for job in all_jobs):
+                            downstream_jobs.append(downstream_name)
+                            logger.info(f"Found valid downstream job: {downstream_name}")
+                        else:
+                            logger.warning(f"Downstream job not found in job list: {downstream_name}")
+                    except Exception as e:
+                        logger.warning(f"Error checking downstream job {downstream_name}: {str(e)}")
                         continue
 
         # Trigger the job
         try:
+            logger.info(f"Triggering job {job_name} with parameters: {params}")
             build_number = jenkins_server.build_job(job_name, parameters=params)
-            job_url = f"{jenkins_server.get_job_url(job_name)}/{build_number}/console"
+            logger.info(f"Successfully triggered job {job_name}, build #{build_number}")
+            
+            # Get job URL - handle cases where get_job_url might fail
+            try:
+                job_url = f"{jenkins_server.get_job_url(job_name)}/{build_number}/console"
+            except Exception as e:
+                logger.warning(f"Could not get job URL: {str(e)}")
+                job_url = f"Jenkins job: {job_name} #{build_number}"
+                
             response_text += f"• Job URL: {job_url}\n"
             
             # Add information about downstream jobs
@@ -204,12 +237,14 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             })
 
         except jenkins.JenkinsException as e:
+            logger.error(f"Jenkins error while triggering job {job_name}: {str(e)}")
             return jsonify({
                 "response_type": "ephemeral",
                 "text": f"❌ Jenkins Error: {str(e)}"
             })
 
     except Exception as e:
+        logger.error(f"Unexpected error in jenkins_handler: {str(e)}")
         return jsonify({
             "response_type": "ephemeral",
             "text": f"❌ Error: {str(e)}"

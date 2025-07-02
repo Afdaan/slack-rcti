@@ -18,7 +18,7 @@ def validate_branch_name(branch):
     is_valid = bool(re.match(r'^[a-zA-Z0-9_./\-]+$', branch))
     
     if not is_valid:
-        logger.warning(f"Branch validation failed. Branch: '{branch}', Length: {len(branch)}, Chars: {[ord(c) for c in branch]}")
+        logger.warning(f"Invalid branch name format: {branch}")
     
     return is_valid
 
@@ -182,21 +182,22 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             
             # Get downstream jobs
             downstream_jobs = []
+            # Get downstream jobs and handle them first
+            downstream_jobs = []
             try:
                 downstream_info = job.get_downstream_jobs()
                 for downstream in downstream_info:
                     downstream_jobs.append(downstream.name)
                     logger.info(f"Found downstream job: {downstream.name}")
                     
-                    # Try to set environment variable for branch if downstream exists
+                    # Try to get downstream job and check if it accepts BRANCH parameter
                     try:
-                        downstream_config = downstream.get_config()
+                        downstream_job = jenkins[downstream.name]
+                        downstream_config = downstream_job.get_config()
                         if 'BRANCH' in downstream_config:
-                            # Set environment property for downstream job
-                            downstream.set_config_parameter('BRANCH', branch_value)
-                            logger.info(f"Set BRANCH={branch_value} for downstream job {downstream.name}")
+                            logger.info(f"Downstream job {downstream.name} accepts BRANCH parameter")
                     except Exception as e:
-                        logger.warning(f"Could not set branch for downstream job {downstream.name}: {str(e)}")
+                        logger.warning(f"Could not check downstream job {downstream.name} parameters: {str(e)}")
                         
             except Exception as e:
                 logger.warning(f"Error getting downstream jobs: {str(e)}")
@@ -209,55 +210,74 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 else:
                     queue_item = job.invoke()
                 logger.info("Build queued successfully")
+                
+                # Wait for build number
+                try:
+                    build = queue_item.get_build()
+                    build_number = build.buildno
+                    build_url = build.baseurl
+                    logger.info(f"Build started: #{build_number}")
+                    
+                    # Now that we have the main build, try to trigger downstream jobs with branch
+                    for downstream_name in downstream_jobs:
+                        try:
+                            downstream_job = jenkins[downstream_name]
+                            downstream_config = downstream_job.get_config()
+                            if 'BRANCH' in downstream_config and branch_value:
+                                downstream_job.invoke(build_params={'BRANCH': branch_value})
+                                logger.info(f"Triggered downstream job {downstream_name} with BRANCH={branch_value}")
+                        except Exception as e:
+                            logger.warning(f"Could not trigger downstream job {downstream_name}: {str(e)}")
+                            
+                except Exception as e:
+                    logger.warning(f"Could not get build number/URL: {str(e)}")
+                    build_number = "queued"
+                    build_url = job.baseurl
+                    
             except Exception as e:
                 if "This job does not support parameters" in str(e):
                     # Try without parameters
                     queue_item = job.invoke()
                     logger.info("Build queued successfully without parameters")
+                    
+                    try:
+                        build = queue_item.get_build()
+                        build_number = build.buildno
+                        build_url = build.baseurl
+                        logger.info(f"Build started: #{build_number}")
+                    except Exception as e:
+                        logger.warning(f"Could not get build number/URL: {str(e)}")
+                        build_number = "queued"
+                        build_url = job.baseurl
                 else:
                     raise e
-            
-            # Wait for build number (with timeout)
-            try:
-                build = queue_item.get_build(timeout=10)
-                build_number = build.buildno
-                build_url = build.baseurl
-                logger.info(f"Build started: #{build_number}")
-            except Exception as e:
-                logger.warning(f"Could not get build number/URL: {str(e)}")
-                build_number = "queued"
-                build_url = job.baseurl
             
             # Build response message
             response_text = (
                 f"🚀 *Deployment Started!*\n"
                 f"• Job: `{job_name}`\n"
-                f"• Branch: `{params['BRANCH']}`\n"
             )
+            
+            if 'BRANCH' in params:
+                response_text += f"• Branch: `{params['BRANCH']}`\n"
+            elif branch_value:  # Fallback to branch_value if not in params
+                response_text += f"• Branch: `{branch_value}`\n"
             
             if 'COMMIT' in params:
                 response_text += f"• Commit: `{params['COMMIT']}`\n"
                 
-            response_text += f"• Build: #{build_number}\n"
-            response_text += f"• URL: {build_url}\n"
+            response_text += f"• Build: <{build_url}|#{build_number}>\n"
             
             if downstream_jobs:
                 response_text += f"• Downstream Jobs: {', '.join(f'`{j}`' for j in downstream_jobs)}\n"
-                response_text += f"_Note: Downstream jobs will be triggered automatically with branch=`{params['BRANCH']}`_\n"
+                if branch_value:
+                    response_text += f"_Note: Downstream jobs will be triggered with branch=`{branch_value}`_\n"
             
             response_text += f"• Triggered by: @{user_name}"
 
             return jsonify({
                 "response_type": "in_channel",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": response_text
-                        }
-                    }
-                ]
+                "text": response_text
             })
 
         except JenkinsAPIException as e:
@@ -274,6 +294,127 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 "text": error_msg
             })
 
+    except Exception as e:
+        logger.error(f"Unexpected error in jenkins_handler: {str(e)}")
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": f"❌ Error: {str(e)}"
+        })
+    try:
+        # Parse job name and parameters from the command
+        command_parts = data.get('text', '').strip().split()
+        if not command_parts:
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": "❌ Error: Please provide a job name"
+            })
+        
+        job_name = command_parts[0]
+        params = {}
+        branch_value = None  # Store branch value separately for downstream jobs
+        
+        # Parse parameters (format: key=value)
+        for part in command_parts[1:]:
+            if '=' in part:
+                key, value = part.split('=', 1)
+                params[key.upper()] = value
+                if key.upper() == 'BRANCH':
+                    branch_value = value
+        
+        logger.info(f"Deploying job: {job_name} with params: {params}")
+        
+        try:
+            job = jenkins[job_name]
+        except Exception as e:
+            logger.error(f"Job not found: {job_name}")
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": f"❌ Error: Job `{job_name}` not found"
+            })
+        
+        # Get downstream jobs
+        downstream_jobs = []
+        try:
+            downstream_info = job.get_downstream_jobs()
+            for downstream in downstream_info:
+                downstream_jobs.append(downstream.name)
+                logger.info(f"Found downstream job: {downstream.name}")
+                
+                # Try to get downstream job and check if it accepts BRANCH parameter
+                try:
+                    downstream_job = jenkins[downstream.name]
+                    downstream_config = downstream_job.get_config()
+                    if 'BRANCH' in downstream_config:
+                        # Don't modify the config, but note that this job needs the branch
+                        logger.info(f"Downstream job {downstream.name} accepts BRANCH parameter")
+                        # Try to build with parameters directly
+                        try:
+                            downstream_job.invoke(build_params={'BRANCH': branch_value})
+                            logger.info(f"Triggered downstream job {downstream.name} with BRANCH={branch_value}")
+                        except Exception as e:
+                            logger.warning(f"Could not trigger downstream job {downstream.name} with parameters: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Could not check downstream job {downstream.name} parameters: {str(e)}")
+                    
+        except Exception as e:
+            logger.warning(f"Error getting downstream jobs: {str(e)}")
+            # Continue with the main job even if downstream job check fails
+        
+        # Trigger build with parameters (if any)
+        logger.info(f"Triggering build for {job_name}" + (f" with params: {params}" if params else " without params"))
+        try:
+            if params:
+                queue_item = job.invoke(build_params=params)
+            else:
+                queue_item = job.invoke()
+            logger.info("Build queued successfully")
+        except Exception as e:
+            if "This job does not support parameters" in str(e):
+                # Try without parameters
+                queue_item = job.invoke()
+                logger.info("Build queued successfully without parameters")
+            else:
+                raise e
+        
+        # Wait for build number (without timeout)
+        try:
+            build = queue_item.get_build()  # No timeout parameter
+            build_number = build.buildno
+            build_url = build.baseurl
+            logger.info(f"Build started: #{build_number}")
+        except Exception as e:
+            logger.warning(f"Could not get build number/URL: {str(e)}")
+            build_number = "queued"
+            build_url = job.baseurl
+        
+        # Build response message
+        response_text = (
+            f"🚀 *Deployment Started!*\n"
+            f"• Job: `{job_name}`\n"
+        )
+        
+        if 'BRANCH' in params:
+            response_text += f"• Branch: `{params['BRANCH']}`\n"
+        elif branch_value:  # Fallback to branch_value if not in params
+            response_text += f"• Branch: `{branch_value}`\n"
+            
+        if downstream_jobs:
+            response_text += f"• Downstream jobs: `{', '.join(downstream_jobs)}`\n"
+        
+        response_text += f"• Build: <{build_url}|#{build_number}>"
+        
+        return jsonify({
+            "response_type": "in_channel",
+            "text": response_text
+        })
+        
+    except JenkinsAPIException as e:
+        logger.error(f"Jenkins API error: {str(e)}")
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": f"❌ Jenkins API Error: {str(e)}"
+        })
+        
     except Exception as e:
         logger.error(f"Unexpected error in jenkins_handler: {str(e)}")
         return jsonify({

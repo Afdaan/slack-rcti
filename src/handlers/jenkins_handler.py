@@ -4,6 +4,7 @@ import os
 import logging
 import time
 import threading
+import json
 from jenkinsapi.jenkins import Jenkins
 from jenkinsapi.custom_exceptions import JenkinsAPIException
 from slack_sdk import WebClient
@@ -50,125 +51,7 @@ def wait_for_build_success(build, max_attempts=30, delay=10):
         time.sleep(delay)
     return False
 
-def handle_downstream_build(jenkins, main_build, downstream_name, branch_value, slack_client=None, channel=None, thread_ts=None):
-    """Handle downstream build that is auto-triggered by Jenkins"""
-    try:
-        # First wait for the main build to complete successfully
-        if not wait_for_build_success(main_build):
-            logger.error(f"Main build failed or timed out, downstream job {downstream_name} may not trigger")
-            if slack_client and channel and thread_ts:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=f"❌ Main build failed or timed out, downstream job {downstream_name} may not trigger"
-                )
-            return None
 
-        logger.info(f"Main build successful, monitoring for auto-triggered {downstream_name}")
-        if slack_client and channel and thread_ts:
-            slack_client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text=f"✅ Main build successful, monitoring for auto-triggered {downstream_name}"
-            )
-
-        # Get the downstream job
-        downstream_job = jenkins[downstream_name]
-        
-        # Wait for the auto-triggered build to appear (it might take a few seconds)
-        max_attempts = 10
-        build = None
-        for attempt in range(max_attempts):
-            try:
-                # Get the latest build
-                latest_build = downstream_job.get_last_build()
-                if latest_build:
-                    # Check the build cause
-                    cause = get_build_cause(latest_build)
-                    if (cause and 
-                        cause['type'] == 'upstream' and 
-                        cause['project'] == main_build.job.name and
-                        cause['build'] == main_build.buildno):
-                        build = latest_build
-                        break
-                    # Fallback to timestamp check if cause check fails
-                    elif latest_build.get_timestamp() > main_build.get_timestamp():
-                        build = latest_build
-                        break
-            except Exception as e:
-                logger.debug(f"Error checking for new build (attempt {attempt + 1}): {str(e)}")
-            time.sleep(5)  # Wait before next check
-
-        if build:
-            status_msg = f"Found auto-triggered downstream job {downstream_name}: <{build.baseurl}|#{build.buildno}>"
-            if slack_client and channel and thread_ts:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=status_msg
-                )
-            logger.info(status_msg)
-            
-            # Monitor for input state with increased checks
-            max_input_checks = 15  # More attempts
-            for attempt in range(max_input_checks):
-                try:
-                    build.poll()  # Refresh build info
-                    build_url = build.baseurl
-                    
-                    # Check if build is waiting for input
-                    if '/input/' in build_url:
-                        logger.info(f"Found input prompt in {downstream_name} (attempt {attempt + 1})")
-                        try:
-                            # Submit the branch parameter
-                            input_url = f"{build_url}input/proceed"
-                            jenkins.requester.post_and_confirm_status(
-                                input_url,
-                                data={
-                                    'json': f'{{"parameter": {{"name": "BRANCH", "value": "{branch_value}"}}}}',
-                                    'proceed': 'true'
-                                }
-                            )
-                            status_msg = f"✅ Submitted branch parameter to {downstream_name}"
-                            if slack_client and channel and thread_ts:
-                                slack_client.chat_postMessage(
-                                    channel=channel,
-                                    thread_ts=thread_ts,
-                                    text=status_msg
-                                )
-                            logger.info(status_msg)
-                            return build
-                        except Exception as e:
-                            logger.warning(f"Failed to submit input parameter: {str(e)}")
-                except Exception as e:
-                    logger.debug(f"Error checking build status (attempt {attempt + 1}): {str(e)}")
-                time.sleep(4)  # Longer delay between checks
-        else:
-            logger.warning(f"No new build detected for {downstream_name} after {max_attempts} attempts")
-            if slack_client and channel and thread_ts:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=f"⚠️ No new build detected for {downstream_name} after monitoring for {max_attempts * 5} seconds"
-                )
-        
-        return build
-    except Exception as e:
-        logger.error(f"Error handling downstream build {downstream_name}: {str(e)}")
-        return None
-
-def monitor_downstream_build(jenkins, downstream_name, branch_value, main_build_time, max_attempts=12):
-    """Monitor for a new downstream build after main build"""
-    for attempt in range(max_attempts):
-        try:
-            downstream_job = jenkins[downstream_name]
-            build = downstream_job.get_last_build()
-            if build and build.get_timestamp() > main_build_time:
-                return build
-        except Exception as e:
-            logger.debug(f"Error checking downstream build (attempt {attempt + 1}): {str(e)}")
-        time.sleep(5)  # Wait 5 seconds between checks
-    return None
 
 def async_handle_builds(job_name, build, downstream_jobs, branch_value, channel_id, thread_ts):
     """Asynchronously handle main build and monitor downstream builds"""
@@ -176,7 +59,7 @@ def async_handle_builds(job_name, build, downstream_jobs, branch_value, channel_
         slack_client = WebClient(token=os.getenv('SLACK_BOT_TOKEN'))
         
         # Monitor main build for input and completion
-        if check_and_handle_input(build, branch_value):
+        if is_waiting_for_input(build) and submit_pipeline_input(build, branch_value):
             slack_client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
@@ -197,101 +80,63 @@ def async_handle_builds(job_name, build, downstream_jobs, branch_value, channel_
         
         # Monitor downstream builds that should be auto-triggered
         for downstream_name in downstream_jobs:
-            # Wait and look for new downstream build
-            downstream_build = monitor_downstream_build(
+            # Monitor and handle the downstream build
+            monitor_and_handle_downstream(
                 build.job.jenkins,
+                build,
                 downstream_name,
                 branch_value,
-                main_build_time
+                slack_client,
+                channel_id,
+                thread_ts
             )
             
-            if downstream_build:
-                status_msg = f"Downstream job {downstream_name} started: <{downstream_build.baseurl}|#{downstream_build.buildno}>"
-                slack_client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=status_msg
-                )
-                
-                # Monitor for input parameter needs
-                max_input_checks = 15
-                for _ in range(max_input_checks):
-                    if check_and_handle_input(downstream_build, branch_value):
-                        slack_client.chat_postMessage(
-                            channel=channel_id,
-                            thread_ts=thread_ts,
-                            text=f"✅ Submitted branch parameter to {downstream_name}"
-                        )
-                        break
-                    time.sleep(4)
-            else:
-                slack_client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=f"⚠️ Could not detect downstream job {downstream_name}, please check manually"
-                )
+            # Monitoring and handling is now done in monitor_and_handle_downstream
     except Exception as e:
         logger.error(f"Error in async build handling: {str(e)}")
 
-def check_and_handle_input(build, branch_value):
-    """Check if build is waiting for input and handle Pipeline Input Step"""
-    try:
-        if not hasattr(build, 'is_running') or not build.is_running():
-            return False
 
-        # Get the build info to check for input action
+
+def submit_pipeline_input(build, branch_value):
+    """Submit input parameters to a Pipeline Input Step"""
+    try:
         build_url = build.baseurl
-        build.poll()  # Refresh build info
+        input_url = f"{build_url}input/submit"
         
-        # Check if build has InputAction in its actions
-        build_info = build.get_actions()
-        has_input = any(
-            action.get('_class') == 'org.jenkinsci.plugins.workflow.support.steps.input.InputAction'
-            for action in build_info
+        # Get the input form to check what we need to submit
+        form_response = build.job.jenkins.requester.get_url(f"{build_url}input/")
+        if form_response.status_code != 200:
+            logger.warning(f"Failed to get input form: {form_response.status_code}")
+            return False
+            
+        # Build the submission data
+        submit_data = {
+            'proceed': 'true',
+            'json': json.dumps({
+                "parameter": {
+                    "name": "BRANCH",
+                    "value": branch_value
+                }
+            })
+        }
+        
+        # Try to submit
+        response = build.job.jenkins.requester.post_and_confirm_status(
+            input_url,
+            data=submit_data,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
         )
         
-        if has_input and '/input/' in build_url:
-            logger.info(f"Build {build.buildno} is waiting for input")
-            try:
-                # For Pipeline Input Step, we need to submit the input differently
-                input_url = f"{build_url}input/submit"
-                
-                # First, get the input form to check what parameters it needs
-                form_data = build.job.jenkins.requester.get_url(f"{build_url}input/").text
-                
-                # Prepare the input submission data
-                submit_data = {
-                    'proceed': 'true',
-                    'Jenkins-Crumb': build.job.jenkins.requester.CRUMB,
-                }
-                
-                # If the form contains BRANCH parameter, add it
-                if 'BRANCH' in form_data:
-                    submit_data.update({
-                        'BRANCH': branch_value,
-                        'json': f'{{"parameter": {{"name": "BRANCH", "value": "{branch_value}"}}}}'
-                    })
-                
-                # Submit the input
-                response = build.job.jenkins.requester.post_and_confirm_status(
-                    input_url,
-                    data=submit_data
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"Successfully submitted input for build {build.buildno}")
-                    return True
-                else:
-                    logger.warning(f"Input submission returned status {response.status_code}")
-                    return False
-                    
-            except Exception as e:
-                logger.warning(f"Could not submit input: {str(e)}")
-                return False
+        if response.status_code == 200:
+            logger.info(f"Successfully submitted input for build {build.buildno}")
+            return True
+        else:
+            logger.warning(f"Input submission failed with status {response.status_code}")
+            return False
+            
     except Exception as e:
-        logger.warning(f"Error checking build status: {str(e)}")
+        logger.error(f"Error submitting pipeline input: {str(e)}")
         return False
-    return False
 
 def validate_branch_name(branch):
     """Validate branch name format"""
@@ -508,29 +353,6 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             thread.start()
                 
             return response
-            
-            # Build response message
-            response_text = (
-                f"🚀 *Deployment Started!*\n"
-                f"• Job: `{job_name}`\n"
-                f"• Branch: `{branch_value}`\n"
-            )
-            
-            if 'COMMIT' in params:
-                response_text += f"• Commit: `{params['COMMIT']}`\n"
-            
-            response_text += f"• Build: <{build_url}|#{build_number}>\n"
-            
-            if downstream_jobs:
-                response_text += f"• Downstream Jobs: {', '.join(f'`{j}`' for j in downstream_jobs)}\n"
-                response_text += f"_Note: Downstream jobs will be triggered with branch=`{branch_value}`_\n"
-            
-            response_text += f"• Triggered by: @{user_name}"
-
-            return jsonify({
-                "response_type": "in_channel",
-                "text": response_text
-            })
 
         except JenkinsAPIException as e:
             logger.error(f"Jenkins API error: {str(e)}")
@@ -631,3 +453,79 @@ def async_monitor_build_start(job, queue_item, job_name, branch_value, downstrea
         )
     except Exception as e:
         logger.error(f"Error in async build start monitoring: {str(e)}")
+
+def monitor_and_handle_downstream(jenkins, main_build, downstream_name, branch_value, slack_client=None, channel=None, thread_ts=None):
+    """Monitor and handle downstream build that is auto-triggered by Jenkins"""
+    try:
+        # Get the downstream job
+        downstream_job = jenkins[downstream_name]
+        
+        # Wait for the auto-triggered build to appear
+        max_attempts = 20  # Increased attempts
+        build = None
+        for attempt in range(max_attempts):
+            try:
+                latest_build = downstream_job.get_last_build()
+                if latest_build:
+                    # Check build cause
+                    cause = get_build_cause(latest_build)
+                    if (cause and 
+                        cause['type'] == 'upstream' and 
+                        cause['project'] == main_build.job.name and
+                        cause['build'] == main_build.buildno):
+                        build = latest_build
+                        msg = f"Found auto-triggered downstream job {downstream_name}: <{latest_build.baseurl}|#{latest_build.buildno}>"
+                        logger.info(msg)
+                        if slack_client and channel and thread_ts:
+                            slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+                        break
+            except Exception as e:
+                logger.debug(f"Error checking for new build (attempt {attempt + 1}): {str(e)}")
+            time.sleep(5)
+
+        if not build:
+            msg = f"⚠️ Could not find auto-triggered downstream job {downstream_name} after {max_attempts * 5} seconds"
+            logger.warning(msg)
+            if slack_client and channel and thread_ts:
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+            return None
+
+        # Monitor for input state
+        max_input_checks = 30
+        for attempt in range(max_input_checks):
+            try:
+                build.poll()
+                
+                # Check for input action
+                if is_waiting_for_input(build):
+                    logger.info(f"Found input prompt in {downstream_name}")
+                    
+                    if submit_pipeline_input(build, branch_value):
+                        msg = f"✅ Successfully submitted branch parameter to {downstream_name}"
+                        logger.info(msg)
+                        if slack_client and channel and thread_ts:
+                            slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+                        return build
+                    else:
+                        msg = f"⚠️ Failed to submit branch parameter to {downstream_name}"
+                        logger.warning(msg)
+                        if slack_client and channel and thread_ts:
+                            slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=msg)
+                        return None
+                    
+            except Exception as e:
+                logger.debug(f"Error checking input status (attempt {attempt + 1}): {str(e)}")
+            time.sleep(4)
+        
+        # If we reach here, no input was required
+        return build
+
+    except Exception as e:
+        logger.error(f"Error monitoring downstream {downstream_name}: {str(e)}")
+        if slack_client and channel and thread_ts:
+            slack_client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"❌ Error monitoring {downstream_name}: {str(e)}"
+            )
+        return None

@@ -93,9 +93,9 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
         return jsonify({
             "response_type": "ephemeral",
             "text": (
-                "Usage: /deploy <name_service> branch=<branch_name> [commit=<commit_hash>]\n"
+                "Usage: /deploy <job_name> branch=<branch_name> [commit=<commit_hash>]\n"
                 "Example:\n"
-                "  /deploy mobile-service branch=feature/login\n"
+                "  /deploy my-service branch=feature/login\n"
                 "  /deploy backend-service branch=develop commit=abc123\n"
             )
         })
@@ -104,19 +104,16 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
         # Parse command arguments
         params = {}
         args = text.split()
-        if len(args) < 2:  # Need at least service name and branch
+        if len(args) < 2:  # Need at least job name and branch
             return jsonify({
                 "response_type": "ephemeral",
                 "text": "❌ Error: Branch parameter is required!\n"
-                        "Usage: /deploy <name_service> branch=<branch_name> [commit=<commit_hash>]"
+                        "Usage: /deploy <job_name> branch=<branch_name> [commit=<commit_hash>]"
             })
 
-        # Get service name
-        service_name = args[0]
-        
-        # Construct job names
-        build_job = f"build-{service_name}"
-        k8s_job = f"k8s-{service_name}"
+        # Get job name exactly as provided
+        job_name = args[0].strip()
+        logger.info(f"Processing job: {job_name}")
 
         # Parse parameters
         branch_specified = False
@@ -144,57 +141,54 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             return jsonify({
                 "response_type": "ephemeral",
                 "text": "❌ Branch parameter is required!\n"
-                        "Usage: /deploy <name_service> branch=<branch_name> [commit=<commit_hash>]"
+                        "Usage: /deploy <job_name> branch=<branch_name> [commit=<commit_hash>]"
             })
 
-        # Verify build job exists
+        # Verify job exists
         try:
-            job_info = jenkins_server.get_job_info(build_job)
+            job_info = jenkins_server.get_job_info(job_name)
         except jenkins.NotFoundException:
             return jsonify({
                 "response_type": "ephemeral",
-                "text": f"❌ Job not found: {build_job}"
+                "text": f"❌ Job not found: {job_name}"
             })
 
-        # Verify both build and k8s jobs exist
-        try:
-            build_info = jenkins_server.get_job_info(build_job)
-            k8s_info = jenkins_server.get_job_info(k8s_job)
-        except jenkins.NotFoundException as e:
-            missing_job = build_job if "build" in str(e) else k8s_job
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": f"❌ Job not found: {missing_job}"
-            })
+        # Start building response message
+        response_text = (
+            f"🚀 *Deployment Started!*\n"
+            f"• Job: `{job_name}`\n"
+            f"• Branch: `{params['BRANCH']}`\n"
+        )
+        
+        if 'COMMIT' in params:
+            response_text += f"• Commit: `{params['COMMIT']}`\n"
 
-        # Trigger build job
-        try:
-            # Set same parameters for k8s job
-            k8s_params = {
-                'BRANCH': params['BRANCH']  # Pass the same branch to k8s job
-            }
-            
-            # Start the build job
-            build_number = jenkins_server.build_job(build_job, parameters=params)
-            build_url = f"{jenkins_server.get_job_url(build_job)}/{build_number}/console"
-            k8s_url = jenkins_server.get_job_url(k8s_job)
+        # Get downstream jobs that will be triggered after this one
+        downstream_jobs = []
+        if 'downstreamProjects' in job_info:
+            for downstream in job_info['downstreamProjects']:
+                downstream_name = downstream.get('name')
+                if downstream_name:
+                    try:
+                        # Verify downstream job exists and add to list
+                        jenkins_server.get_job_info(downstream_name)
+                        downstream_jobs.append(downstream_name)
+                    except jenkins.NotFoundException:
+                        logger.warning(f"Downstream job not found: {downstream_name}")
+                        continue
 
-            # Prepare response message
-            response_text = (
-                f"🚀 *Deployment Started!*\n"
-                f"• Service: `{service_name}`\n"
-                f"• Branch: `{params['BRANCH']}`\n"
-            )
+        # Trigger the job
+        try:
+            build_number = jenkins_server.build_job(job_name, parameters=params)
+            job_url = f"{jenkins_server.get_job_url(job_name)}/{build_number}/console"
+            response_text += f"• Job URL: {job_url}\n"
             
-            if 'COMMIT' in params:
-                response_text += f"• Commit: `{params['COMMIT']}`\n"
+            # Add information about downstream jobs
+            if downstream_jobs:
+                response_text += f"• Downstream Jobs: {', '.join(f'`{j}`' for j in downstream_jobs)}\n"
+                response_text += f"_Note: Downstream jobs will be triggered automatically with branch=`{params['BRANCH']}`_\n"
             
-            response_text += (
-                f"• Build Job: {build_url}\n"
-                f"• K8s Job: {k8s_url}\n"
-                f"• Triggered by: @{user_name}\n\n"
-                f"_Note: `{k8s_job}` will be triggered automatically with branch=`{params['BRANCH']}`_"
-            )
+            response_text += f"• Triggered by: @{user_name}"
 
             return jsonify({
                 "response_type": "in_channel",

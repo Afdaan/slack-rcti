@@ -149,7 +149,7 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
         try:
             logger.info(f"Checking if job exists: {job_name}")
             
-            if job_name not in jenkins_server.keys():
+            if not jenkins_server.has_job(job_name):
                 logger.error(f"Job {job_name} not found in Jenkins")
                 return jsonify({
                     "response_type": "ephemeral",
@@ -157,13 +157,13 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
                 })
             
             # Get the job
-            job = jenkins_server[job_name]
+            job = jenkins_server.get_job(job_name)
             logger.info(f"Found job: {job_name}")
             
             # Get downstream jobs
             downstream_jobs = []
             try:
-                for _, downstream in job.get_downstream_jobs():
+                for downstream in job.get_downstream_jobs():
                     downstream_jobs.append(downstream.name)
                     logger.info(f"Found downstream job: {downstream.name}")
             except Exception as e:

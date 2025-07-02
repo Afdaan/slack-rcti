@@ -71,6 +71,10 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             "response_type": "ephemeral",
             "text": "❌ Jenkins connection is not available!"
         }), 503
+        
+    # Use the existing Jenkins connection
+    jenkins = jenkins_server
+    logger.info("Using existing Jenkins connection")
 
     # Get Slack request parameters
     user_id = request.form.get('user_id')
@@ -150,27 +154,24 @@ def jenkins_handler(jenkins_server, allowed_usergroups):
             logger.info(f"Checking if job exists: {job_name}")
             
             try:
-                # Get all jobs first
-                all_jobs = [name for name in jenkins_server.get_jobs_list()]
-                logger.info(f"Found {len(all_jobs)} total jobs")
-                
-                if job_name not in all_jobs:
+                # Check if job exists directly
+                if job_name not in jenkins:
                     logger.error(f"Job {job_name} not found in Jenkins")
                     return jsonify({
                         "response_type": "ephemeral",
                         "text": f"❌ Job not found: {job_name}"
                     })
                 
+                # Get the job
+                job = jenkins[job_name]
+                logger.info(f"Found job: {job_name}")
+                
             except Exception as e:
-                logger.error(f"Error getting jobs list: {str(e)}")
+                logger.error(f"Error checking job: {str(e)}")
                 return jsonify({
                     "response_type": "ephemeral",
                     "text": f"❌ Error accessing Jenkins: {str(e)}"
                 })
-            
-            # Get the job
-            job = jenkins_server[job_name]
-            logger.info(f"Found job: {job_name}")
             
             # Get downstream jobs
             downstream_jobs = []

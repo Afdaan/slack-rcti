@@ -39,21 +39,23 @@ if not all([JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SLACK_SIGNING_SECRET]):
 
 # Import Jenkins after environment validation to avoid unnecessary import errors
 try:
-    import jenkins
+    from jenkinsapi.jenkins import Jenkins
+    from jenkinsapi.custom_exceptions import JenkinsAPIException
 except ImportError as e:
-    logger.error(f"Failed to import jenkins module: {e}")
-    logger.error("Please ensure python-jenkins is installed: pip install python-jenkins")
+    logger.error(f"Failed to import jenkinsapi module: {e}")
+    logger.error("Please ensure jenkinsapi is installed: pip install jenkinsapi")
     sys.exit(1)
 
 # Initialize Jenkins connection
 try:
-    jenkins_server = jenkins.Jenkins(
+    jenkins_server = Jenkins(
         JENKINS_URL,
         username=JENKINS_USER,
         password=JENKINS_TOKEN
     )
+    logger.info(f"Successfully connected to Jenkins at {JENKINS_URL}")
 except Exception as e:
-    print(f"Warning: Failed to initialize Jenkins connection: {e}")
+    logger.error(f"Failed to initialize Jenkins connection: {e}")
     jenkins_server = None
 
 @app.route('/deploy', methods=['POST'])
